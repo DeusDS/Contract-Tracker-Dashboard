@@ -12,7 +12,7 @@ import json
 import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -31,7 +31,7 @@ DATE_RE = re.compile(r"\b\d{1,2}/\d{1,2}/\d{4}\b")
 
 
 def clean(value: object) -> str:
-    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<\s*/?br\s*/?\s*>", " | ", str(value or ""), flags=re.I))).strip(" | ")
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<\s*/?br\s*/?\s*>", " | ", str("" if value is None else value), flags=re.I))).strip(" | ")
 
 
 def parse_status(value: object) -> tuple[str, str, str]:
@@ -59,6 +59,29 @@ def parse_days(value: object) -> int | float | str:
     except ValueError:
         return ""
     return int(number) if number.is_integer() else number
+
+
+def age_from_date(value: object, as_of: date) -> int | str:
+    text = clean(value)
+    if not text:
+        return ""
+    try:
+        action_date = datetime.strptime(text, "%m/%d/%Y").date()
+    except ValueError:
+        return ""
+    return max(0, (as_of - action_date).days)
+
+
+def ensure_project_age(project: dict[str, object], as_of: date) -> dict[str, object]:
+    source_age = parse_days(project.get("days_in_current_stage"))
+    if source_age != "":
+        project["days_in_current_stage"] = source_age
+        project["age_source"] = clean(project.get("age_source")) or "Source export"
+        return project
+    derived_age = age_from_date(project.get("current_stage_date"), as_of)
+    project["days_in_current_stage"] = derived_age
+    project["age_source"] = "Derived from current workflow date" if derived_age != "" else ""
+    return project
 
 
 def sheet_records(path: Path, name: str) -> list[dict[str, object]]:
@@ -108,6 +131,7 @@ def normalize_raw(path: Path) -> dict[str, object]:
     projects: list[dict[str, object]] = []
     events: list[dict[str, object]] = []
     issues: list[dict[str, object]] = []
+    data_as_of = datetime.fromtimestamp(path.stat().st_mtime).date()
     for source_row in raw_records(path):
         if clean(source_row.get("Department")) != DEPARTMENT:
             continue
@@ -136,10 +160,11 @@ def normalize_raw(path: Path) -> dict[str, object]:
             "current_status": str(current.get("status", "No workflow status")),
             "current_stage_date": str(current.get("action_date", "")),
             "days_in_current_stage": days,
+            "age_source": "Source: Days Since Contract Request" if days != "" else "",
             "waiting_on": str(current.get("waiting_on", "")),
             "stage_source": "Derived from loaded export",
         }
-        projects.append(project)
+        projects.append(ensure_project_age(project, data_as_of))
         events.extend(project_events)
         for field in ("project_name", "requisition_id", "contract_number", "project_manager"):
             if not str(project[field]).strip():
@@ -154,10 +179,12 @@ def payload_from_workbook(path: Path) -> dict[str, object]:
     workbook = load_workbook(path, read_only=True, data_only=True)
     if "Projects" in workbook.sheetnames:
         projects = [row for row in sheet_records(path, "Projects") if clean(row.get("department")) == DEPARTMENT]
+        workbook_as_of = datetime.fromtimestamp(path.stat().st_mtime).date()
         for project in projects:
             if not clean(project.get("project_manager")):
                 project["project_manager"] = clean(project.get("program_manager"))
             project.pop("program_manager", None)
+            ensure_project_age(project, workbook_as_of)
         keys = {row.get("project_key") for row in projects}
         events = [row for row in sheet_records(path, "Workflow Events") if row.get("project_key") in keys] if "Workflow Events" in workbook.sheetnames else []
         issues = [row for row in sheet_records(path, "Data Quality") if row.get("project_key") in keys] if "Data Quality" in workbook.sheetnames else []
