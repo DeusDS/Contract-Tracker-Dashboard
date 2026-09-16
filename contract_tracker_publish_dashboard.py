@@ -44,7 +44,21 @@ def parse_status(value: object) -> tuple[str, str, str]:
 
 
 def is_terminal(status: str) -> bool:
-    return any(word in status.lower() for word in ("complete", "executed"))
+    normalized = clean(status).casefold()
+    if "partial" in normalized:
+        return False
+    return normalized in {"complete", "completed", "approvals completed", "executed", "fully executed"}
+
+
+def parse_days(value: object) -> int | float | str:
+    text = clean(value)
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except ValueError:
+        return ""
+    return int(number) if number.is_integer() else number
 
 
 def sheet_records(path: Path, name: str) -> list[dict[str, object]]:
@@ -55,9 +69,19 @@ def sheet_records(path: Path, name: str) -> list[dict[str, object]]:
 
 
 def csv_records(path: Path) -> list[dict[str, object]]:
-    """Read CSV exports, accommodating UTF-8 and Excel's common UTF-8 BOM."""
+    """Find the real header row and read CSV exports with leading blank lines."""
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        return list(csv.DictReader(handle))
+        rows = list(csv.reader(handle))
+    required = {"Requisition Id", "Contract Request Status"}
+    for index, row in enumerate(rows[:20]):
+        headers = [clean(value) for value in row]
+        if required.issubset(headers):
+            return [
+                dict(zip(headers, values))
+                for values in rows[index + 1:]
+                if any(clean(value) for value in values)
+            ]
+    return []
 
 
 def raw_records(path: Path) -> list[dict[str, object]]:
@@ -96,7 +120,7 @@ def normalize_raw(path: Path) -> dict[str, object]:
                 project_events.append({"project_key": key, "stage_rank": rank, "portal": portal, "status": status, "action_date": action_date, "waiting_on": waiting_on, "source": "Derived from loaded export"})
         current = (next((event for event in reversed(project_events) if not is_terminal(str(event["status"]))), None) or (project_events[-1] if project_events else {}))
         current_portal = str(current.get("portal", "Unclassified"))
-        days = source_row.get("Days Since Contract Request") if current_portal == "Contract Request" else ""
+        days = parse_days(source_row.get("Days Since Contract Request")) if current_portal == "Contract Request" else ""
         project = {
             "project_key": key,
             "requisition_id": requisition_id,
@@ -111,7 +135,7 @@ def normalize_raw(path: Path) -> dict[str, object]:
             "current_portal": current_portal,
             "current_status": str(current.get("status", "No workflow status")),
             "current_stage_date": str(current.get("action_date", "")),
-            "days_in_current_stage": days if isinstance(days, (int, float)) else "",
+            "days_in_current_stage": days,
             "waiting_on": str(current.get("waiting_on", "")),
             "stage_source": "Derived from loaded export",
         }
@@ -153,7 +177,7 @@ def add_metadata(data: dict[str, object], path: Path) -> dict[str, object]:
         "records": len(data["projects"]),
         "events": len(data["events"]),
         "issues": len(data["issues"]),
-        "note": "Published from the latest Excel workbook by the local dashboard publisher.",
+        "note": "Published from the latest Excel or CSV export by the local dashboard publisher.",
     }
     return data
 
