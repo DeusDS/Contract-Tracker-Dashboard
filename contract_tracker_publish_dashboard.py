@@ -104,7 +104,6 @@ def normalize_raw(path: Path) -> dict[str, object]:
             "project_name": clean(source_row.get("Project Name")),
             "vendor": clean(source_row.get("Vendor")),
             "department": DEPARTMENT,
-            "program_manager": "",
             "project_manager": clean(source_row.get("Project Manager")),
             "procurement_type": clean(source_row.get("Procurement Type")),
             "document_type": clean(source_row.get("Document Type")),
@@ -118,7 +117,7 @@ def normalize_raw(path: Path) -> dict[str, object]:
         }
         projects.append(project)
         events.extend(project_events)
-        for field in ("project_name", "requisition_id", "contract_number", "program_manager", "project_manager"):
+        for field in ("project_name", "requisition_id", "contract_number", "project_manager"):
             if not str(project[field]).strip():
                 issues.append({"project_key": key, "project_name": project["project_name"], "field": field.replace("_", " ").title(), "issue": "Missing from loaded export", "severity": "High" if field in {"project_name", "requisition_id"} else "Medium"})
     return {"projects": projects, "events": events, "issues": issues}
@@ -131,6 +130,10 @@ def payload_from_workbook(path: Path) -> dict[str, object]:
     workbook = load_workbook(path, read_only=True, data_only=True)
     if "Projects" in workbook.sheetnames:
         projects = [row for row in sheet_records(path, "Projects") if clean(row.get("department")) == DEPARTMENT]
+        for project in projects:
+            if not clean(project.get("project_manager")):
+                project["project_manager"] = clean(project.get("program_manager"))
+            project.pop("program_manager", None)
         keys = {row.get("project_key") for row in projects}
         events = [row for row in sheet_records(path, "Workflow Events") if row.get("project_key") in keys] if "Workflow Events" in workbook.sheetnames else []
         issues = [row for row in sheet_records(path, "Data Quality") if row.get("project_key") in keys] if "Data Quality" in workbook.sheetnames else []
