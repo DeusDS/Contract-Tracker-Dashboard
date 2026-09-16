@@ -144,6 +144,17 @@ def normalize_raw(path: Path) -> dict[str, object]:
                 project_events.append({"project_key": key, "stage_rank": rank, "portal": portal, "status": status, "action_date": action_date, "waiting_on": waiting_on, "source": "Derived from loaded export"})
         current = (next((event for event in reversed(project_events) if not is_terminal(str(event["status"]))), None) or (project_events[-1] if project_events else {}))
         current_portal = str(current.get("portal", "Unclassified"))
+        current_date = clean(current.get("action_date"))
+        date_source_portal = current_portal if current_date else ""
+        if not current_date and current:
+            eligible_dates = [
+                event for event in project_events
+                if clean(event.get("action_date")) and int(event.get("stage_rank", 0)) <= int(current.get("stage_rank", 0))
+            ]
+            if eligible_dates:
+                dated_event = max(eligible_dates, key=lambda event: datetime.strptime(str(event["action_date"]), "%m/%d/%Y"))
+                current_date = str(dated_event["action_date"])
+                date_source_portal = str(dated_event["portal"])
         days = parse_days(source_row.get("Days Since Contract Request")) if current_portal == "Contract Request" else ""
         project = {
             "project_key": key,
@@ -158,7 +169,8 @@ def normalize_raw(path: Path) -> dict[str, object]:
             "record_state": "Active (source export)",
             "current_portal": current_portal,
             "current_status": str(current.get("status", "No workflow status")),
-            "current_stage_date": str(current.get("action_date", "")),
+            "current_stage_date": current_date,
+            "stage_date_source": "Current workflow date" if current_date and date_source_portal == current_portal else (f"Latest known date from {date_source_portal}" if current_date else ""),
             "days_in_current_stage": days,
             "age_source": "Source: Days Since Contract Request" if days != "" else "",
             "waiting_on": str(current.get("waiting_on", "")),
