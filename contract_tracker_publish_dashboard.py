@@ -173,6 +173,19 @@ def git(*args: str) -> str:
     return result.stdout.strip()
 
 
+def commit_and_push(dashboard: Path, message: str) -> bool:
+    """Commit changed dashboard data when needed, then publish pending commits."""
+    git("add", "--", dashboard.name)
+    staged_files = git("diff", "--cached", "--name-only")
+    committed = bool(staged_files)
+    if committed:
+        git("commit", "-m", message)
+    else:
+        print("Dashboard data is unchanged; no new commit was needed.")
+    git("push", "origin", "main")
+    return committed
+
+
 def pick_workbook() -> Path:
     import tkinter as tk
     from tkinter import filedialog
@@ -205,9 +218,10 @@ def main() -> None:
     if count != 1:
         raise RuntimeError("Could not locate the embedded dashboard data block.")
     dashboard.write_text(updated, encoding="utf-8")
-    git("add", "--", dashboard.name)
-    git("commit", "-m", f"Refresh Aging contract tracker data ({payload['meta']['data_as_of']})")
-    git("push", "origin", "main")
+    commit_and_push(
+        dashboard,
+        f"Refresh Aging contract tracker data ({payload['meta']['data_as_of']})",
+    )
     print(f"Published {payload['meta']['records']} Aging projects to https://deusds.github.io/Contract-Tracker-Dashboard/")
 
 
