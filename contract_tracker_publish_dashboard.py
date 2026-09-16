@@ -6,6 +6,7 @@ script updates the one hosted dashboard, commits the change, and pushes main.
 from __future__ import annotations
 
 import argparse
+import csv
 import html
 import json
 import re
@@ -17,7 +18,6 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 REPO = Path(r"C:\Users\damon\OneDrive - Atlanta Regional Commission\ARC\Desktop\GitHub\Aging Dashboards\Aging Contract Dashboards\Contract Tracker Dashboard")
-DASHBOARD_NAME = "Aging_Project_Tracker_Interactive_Dashboard - 09.15.26.html"
 DEPARTMENT = "Aging & Independence Services"
 STAGES = [
     ("Procurement Request Status", "Procurement"),
@@ -54,7 +54,19 @@ def sheet_records(path: Path, name: str) -> list[dict[str, object]]:
     return [dict(zip(headers, row)) for row in worksheet.iter_rows(min_row=2, values_only=True)]
 
 
+def csv_records(path: Path) -> list[dict[str, object]]:
+    """Read CSV exports, accommodating UTF-8 and Excel's common UTF-8 BOM."""
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
 def raw_records(path: Path) -> list[dict[str, object]]:
+    if path.suffix.lower() == ".csv":
+        records = csv_records(path)
+        required = {"Requisition Id", "Contract Request Status"}
+        if not records or not required.issubset(records[0]):
+            raise ValueError("The CSV does not contain a recognizable Project Tracker export.")
+        return records
     workbook = load_workbook(path, read_only=True, data_only=True)
     matches: list[tuple[int, list[object], list[tuple[object, ...]]]] = []
     for worksheet in workbook.worksheets:
@@ -113,6 +125,9 @@ def normalize_raw(path: Path) -> dict[str, object]:
 
 
 def payload_from_workbook(path: Path) -> dict[str, object]:
+    if path.suffix.lower() == ".csv":
+        data = normalize_raw(path)
+        return add_metadata(data, path)
     workbook = load_workbook(path, read_only=True, data_only=True)
     if "Projects" in workbook.sheetnames:
         projects = [row for row in sheet_records(path, "Projects") if clean(row.get("department")) == DEPARTMENT]
@@ -122,6 +137,10 @@ def payload_from_workbook(path: Path) -> dict[str, object]:
         data = {"projects": projects, "events": events, "issues": issues}
     else:
         data = normalize_raw(path)
+    return add_metadata(data, path)
+
+
+def add_metadata(data: dict[str, object], path: Path) -> dict[str, object]:
     if not data["projects"]:
         raise ValueError(f"No {DEPARTMENT} project records were found in the selected workbook.")
     data["meta"] = {
@@ -136,6 +155,17 @@ def payload_from_workbook(path: Path) -> dict[str, object]:
     return data
 
 
+def hosted_dashboard() -> Path:
+    """Find the active GitHub Pages document without relying on historical names."""
+    index = REPO / "index.html"
+    if index.exists():
+        return index
+    candidates = [path for path in REPO.glob("*.html") if "const INITIAL=" in path.read_text(encoding="utf-8", errors="ignore")]
+    if len(candidates) == 1:
+        return candidates[0]
+    raise FileNotFoundError("Could not identify the hosted dashboard HTML file. Expected index.html or one HTML file containing the dashboard data block.")
+
+
 def git(*args: str) -> str:
     result = subprocess.run(["git", "-C", str(REPO), *args], capture_output=True, text=True)
     if result.returncode:
@@ -147,7 +177,7 @@ def pick_workbook() -> Path:
     import tkinter as tk
     from tkinter import filedialog
     root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-    selected = filedialog.askopenfilename(title="Select the latest Project Tracker Excel export", filetypes=[("Excel workbooks", "*.xlsx *.xls"), ("All files", "*.*")])
+    selected = filedialog.askopenfilename(title="Select the latest Project Tracker Excel or CSV export", filetypes=[("Excel or CSV", "*.xlsx *.xls *.csv"), ("Excel workbooks", "*.xlsx *.xls"), ("CSV files", "*.csv"), ("All files", "*.*")])
     root.destroy()
     if not selected:
         raise SystemExit("No workbook selected. Nothing was published.")
@@ -156,8 +186,8 @@ def pick_workbook() -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, help="Excel export to publish; omit to open the Windows file picker.")
-    parser.add_argument("--dry-run", action="store_true", help="Validate the Excel export without changing or publishing the dashboard.")
+    parser.add_argument("--source", type=Path, help="Excel or CSV export to publish; omit to open the Windows file picker.")
+    parser.add_argument("--dry-run", action="store_true", help="Validate the selected Excel or CSV export without changing or publishing the dashboard.")
     args = parser.parse_args()
     source = args.source or pick_workbook()
     if not source.exists():
@@ -166,9 +196,7 @@ def main() -> None:
     if args.dry_run:
         print(f"Validated {payload['meta']['records']} Aging projects, {payload['meta']['events']} events, and {payload['meta']['issues']} exceptions.")
         return
-    dashboard = REPO / DASHBOARD_NAME
-    if not dashboard.exists():
-        raise FileNotFoundError(f"Hosted dashboard was not found: {dashboard}")
+    dashboard = hosted_dashboard()
     if git("status", "--porcelain"):
         raise RuntimeError("Repository has uncommitted changes. Commit or stash them before publishing a dashboard refresh.")
     document = dashboard.read_text(encoding="utf-8")
@@ -177,7 +205,7 @@ def main() -> None:
     if count != 1:
         raise RuntimeError("Could not locate the embedded dashboard data block.")
     dashboard.write_text(updated, encoding="utf-8")
-    git("add", "--", DASHBOARD_NAME)
+    git("add", "--", dashboard.name)
     git("commit", "-m", f"Refresh Aging contract tracker data ({payload['meta']['data_as_of']})")
     git("push", "origin", "main")
     print(f"Published {payload['meta']['records']} Aging projects to https://deusds.github.io/Contract-Tracker-Dashboard/")
