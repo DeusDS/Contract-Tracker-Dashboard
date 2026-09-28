@@ -91,14 +91,23 @@ def sheet_records(path: Path, name: str) -> list[dict[str, object]]:
     return [dict(zip(headers, row)) for row in worksheet.iter_rows(min_row=2, values_only=True)]
 
 
+def requisition_value(row: dict[str, object]) -> str:
+    """Support both the legacy and current requisition header."""
+    return clean(row.get("Requisition Number")) or clean(row.get("Requisition Id"))
+
+
+def is_tracker_header(values: list[object]) -> bool:
+    headers = {clean(value) for value in values}
+    return "Contract Request Status" in headers and bool({"Requisition Number", "Requisition Id"} & headers)
+
+
 def csv_records(path: Path) -> list[dict[str, object]]:
     """Find the real header row and read CSV exports with leading blank lines."""
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.reader(handle))
-    required = {"Requisition Id", "Contract Request Status"}
     for index, row in enumerate(rows[:20]):
         headers = [clean(value) for value in row]
-        if required.issubset(headers):
+        if is_tracker_header(headers):
             return [
                 dict(zip(headers, values))
                 for values in rows[index + 1:]
@@ -110,8 +119,7 @@ def csv_records(path: Path) -> list[dict[str, object]]:
 def raw_records(path: Path) -> list[dict[str, object]]:
     if path.suffix.lower() == ".csv":
         records = csv_records(path)
-        required = {"Requisition Id", "Contract Request Status"}
-        if not records or not required.issubset(records[0]):
+        if not records or not is_tracker_header(list(records[0])):
             raise ValueError("The CSV does not contain a recognizable Project Tracker export.")
         return records
     workbook = load_workbook(path, read_only=True, data_only=True)
@@ -119,7 +127,7 @@ def raw_records(path: Path) -> list[dict[str, object]]:
     for worksheet in workbook.worksheets:
         rows = list(worksheet.iter_rows(values_only=True))
         for index, row in enumerate(rows[:6]):
-            if "Requisition Id" in row and "Contract Request Status" in row:
+            if is_tracker_header(list(row)):
                 matches.append((len(rows) - index - 1, list(row), rows[index + 1:]))
     if not matches:
         raise ValueError("The workbook does not contain a recognizable Project Tracker export.")
@@ -135,7 +143,7 @@ def normalize_raw(path: Path) -> dict[str, object]:
     for source_row in raw_records(path):
         if clean(source_row.get("Department")) != DEPARTMENT:
             continue
-        requisition_id = clean(source_row.get("Requisition Id"))
+        requisition_id = requisition_value(source_row)
         key = requisition_id or f"row-{len(projects) + 1}"
         project_events: list[dict[str, object]] = []
         for rank, (column, portal) in enumerate(STAGES, 1):
@@ -159,7 +167,7 @@ def normalize_raw(path: Path) -> dict[str, object]:
         project = {
             "project_key": key,
             "requisition_id": requisition_id,
-            "contract_number": "",
+            "contract_number": clean(source_row.get("Contract Number")),
             "project_name": clean(source_row.get("Project Name")),
             "vendor": clean(source_row.get("Vendor")),
             "department": DEPARTMENT,
